@@ -48,7 +48,6 @@ void VSocket::BuildSocket( char t, bool IPv6 ) {
 
   const int domain = IPv6 ? AF_INET6 : AF_INET;
 
-  // Elegir tipo de socket
   int stype = 0;
   switch (t) {
     case 's': case 'S': stype = SOCK_STREAM; break; // TCP
@@ -57,29 +56,23 @@ void VSocket::BuildSocket( char t, bool IPv6 ) {
       throw std::runtime_error("VSocket::BuildSocket: tipo desconocido (use 's' o 'd')");
   }
 
-  // Crear el socket
   int fd = ::socket(domain, stype, 0);
   if (fd == -1) {
     throw std::runtime_error(std::string("VSocket::BuildSocket: socket() fallo: ")
                               + std::strerror(errno));
   }
 
-  // Opcional: reutilizar dirección rápidamente al reejecutar
   int yes = 1;
   (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
-  // Opcional: si es IPv6, forzar solo-IPv6 (v6only=1) o permitir dual-stack (v6only=0)
   if (domain == AF_INET6) {
-    int v6only = 1; // pon 0 si quieres aceptar IPv4-mapeado también
+    int v6only = 1;
     (void)::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
   }
 
-  // Guardar en el objeto
   this->idSocket = fd;
   this->IPv6     = IPv6;
-  this->type     = (t == 'S') ? 's' : (t == 'D') ? 'd' : t; // normaliza a minúscula
-  // Si tu clase tiene 'port', puedes inicializarlo a 0 aquí:
-  // this->port = 0;
+  this->type     = (t == 'S') ? 's' : (t == 'D') ? 'd' : t;
 
 }
 
@@ -103,7 +96,6 @@ VSocket::~VSocket() {
 void VSocket::Close() {
 
    if (this->idSocket >= 0) {
-    // Intento de cierre ordenado (no falla si es UDP o no está conectado)
     ::shutdown(this->idSocket, SHUT_RDWR);
 
     int rc;
@@ -111,7 +103,6 @@ void VSocket::Close() {
       rc = ::close(this->idSocket);
     } while (rc == -1 && errno == EINTR);
 
-    // Marcar como cerrado para evitar doble close
     this->idSocket = -1;
     this->port = 0;
   }
@@ -139,60 +130,43 @@ int VSocket::EstablishConnection( const char * hostip, int port ) {
     throw std::runtime_error("EstablishConnection(hostip,port): invalid port");
   }
 
-  int st = -1;
+  char svc[16];
+  std::snprintf(svc, sizeof(svc), "%d", port);
 
-  if (this->IPv6) {
-    std::string ip(hostip);
-    unsigned int scope = 0;
+  addrinfo hints{};
+  hints.ai_family = this->IPv6 ? AF_INET6 : AF_INET;
+  hints.ai_socktype = (this->type == 'd' || this->type == 'D') ? SOCK_DGRAM : SOCK_STREAM;
+  hints.ai_flags = AI_NUMERICSERV;
 
-#ifdef __linux__
-    const auto pos = ip.find('%');
-    if (pos != std::string::npos) {
-      std::string ifname = ip.substr(pos + 1);
-      ip.erase(pos);
-      scope = if_nametoindex(ifname.c_str());
+  addrinfo* res = nullptr;
+  int rc = ::getaddrinfo(hostip, svc, &hints, &res);
+  if (rc != 0) {
+    if (rc == EAI_SYSTEM) {
+      throw std::runtime_error(std::string("getaddrinfo: ") + std::strerror(errno));
     }
-#endif
-
-    sockaddr_in6 addr6{};
-    addr6.sin6_family = AF_INET6;
-    addr6.sin6_port = htons(static_cast<uint16_t>(port));
-    if (inet_pton(AF_INET6, ip.c_str(), &addr6.sin6_addr) != 1) {
-      throw std::runtime_error("EstablishConnection(hostip,port): invalid IPv6 literal");
-    }
-#ifdef __linux__
-    if (scope != 0) {
-      addr6.sin6_scope_id = scope;
-    }
-#endif
-
-    do {
-      st = ::connect(this->idSocket,
-                     reinterpret_cast<const sockaddr*>(&addr6),
-                     static_cast<socklen_t>(sizeof(addr6)));
-    } while (st == -1 && errno == EINTR);
-  } else {
-    sockaddr_in addr4{};
-    addr4.sin_family = AF_INET;
-    addr4.sin_port = htons(static_cast<uint16_t>(port));
-    if (inet_pton(AF_INET, hostip, &addr4.sin_addr) != 1) {
-      throw std::runtime_error("EstablishConnection(hostip,port): invalid IPv4 literal");
-    }
-
-    do {
-      st = ::connect(this->idSocket,
-                     reinterpret_cast<const sockaddr*>(&addr4),
-                     static_cast<socklen_t>(sizeof(addr4)));
-    } while (st == -1 && errno == EINTR);
+    throw std::runtime_error(std::string("getaddrinfo: ") + ::gai_strerror(rc));
   }
+
+  int st = -1;
+  for (addrinfo* rp = res; rp != nullptr; rp = rp->ai_next) {
+    do {
+      st = ::connect(this->idSocket, rp->ai_addr, static_cast<socklen_t>(rp->ai_addrlen));
+    } while (st == -1 && errno == EINTR);
+
+    if (st == 0) {
+      // if (rp->ai_family == AF_INET)
+      //   this->port = ntohs(reinterpret_cast<sockaddr_in*>(rp->ai_addr)->sin_port);
+      // else if (rp->ai_family == AF_INET6)
+      //   this->port = ntohs(reinterpret_cast<sockaddr_in6*>(rp->ai_addr)->sin6_port);
+      break;
+    }
+  }
+
+  ::freeaddrinfo(res);
 
   if (st == -1) {
     throw std::runtime_error(std::string("connect failed: ") + std::strerror(errno));
   }
-
-  // Si tu clase tiene 'port', puedes actualizarlo aquí:
-  // this->port = port;
-
   return 0;
 
 }
@@ -217,14 +191,18 @@ int VSocket::EstablishConnection( const char *host, const char *service ) {
 
   addrinfo hints{};
   hints.ai_family = this->IPv6 ? AF_INET6 : AF_INET;
-  int stype = (this->type == 'd' || this->type == 'D') ? SOCK_DGRAM : SOCK_STREAM;
-  hints.ai_socktype = stype;
-  hints.ai_flags = AI_NUMERICSERV;
+  // hints.ai_family = AF_UNSPEC;
+
+  hints.ai_socktype = (this->type == 'd' || this->type == 'D') ? SOCK_DGRAM : SOCK_STREAM;
+  hints.ai_flags = AI_ADDRCONFIG;
 
   addrinfo* res = nullptr;
-  const int rc = ::getaddrinfo(host, service, &hints, &res);
+  int rc = ::getaddrinfo(host, service, &hints, &res);
   if (rc != 0) {
-    throw std::runtime_error(std::string("getaddrinfo: ") + gai_strerror(rc));
+    if (rc == EAI_SYSTEM) {
+      throw std::runtime_error(std::string("getaddrinfo: ") + std::strerror(errno));
+    }
+    throw std::runtime_error(std::string("getaddrinfo: ") + ::gai_strerror(rc));
   }
 
   int st = -1;
@@ -234,7 +212,6 @@ int VSocket::EstablishConnection( const char *host, const char *service ) {
     } while (st == -1 && errno == EINTR);
 
     if (st == 0) {
-      // Opcional: guardar el puerto si tu clase lo expone
       // if (rp->ai_family == AF_INET)
       //   this->port = ntohs(reinterpret_cast<sockaddr_in*>(rp->ai_addr)->sin_port);
       // else if (rp->ai_family == AF_INET6)
@@ -246,9 +223,8 @@ int VSocket::EstablishConnection( const char *host, const char *service ) {
   ::freeaddrinfo(res);
 
   if (st == -1) {
-    throw std::runtime_error(std::string("connect(getaddrinfo) failed: ") + std::strerror(errno));
+    throw std::runtime_error(std::string("connect failed: ") + std::strerror(errno));
   }
-
   return 0;
 
 }

@@ -43,7 +43,6 @@ void VSocket::BuildSocket( char t, bool IPv6 ) {
 
   const int domain = IPv6 ? AF_INET6 : AF_INET;
 
-  // Elegir tipo de socket
   int stype = 0;
   switch (t) {
     case 's': case 'S': stype = SOCK_STREAM; break; // TCP
@@ -52,29 +51,24 @@ void VSocket::BuildSocket( char t, bool IPv6 ) {
       throw std::runtime_error("VSocket::BuildSocket: tipo desconocido (use 's' o 'd')");
   }
 
-  // Crear el socket
   int fd = ::socket(domain, stype, 0);
   if (fd == -1) {
     throw std::runtime_error(std::string("VSocket::BuildSocket: socket() fallo: ")
                               + std::strerror(errno));
   }
 
-  // Opcional: reutilizar dirección rápidamente al reejecutar
   int yes = 1;
   (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
-  // Opcional: si es IPv6, forzar solo-IPv6 (v6only=1) o permitir dual-stack (v6only=0)
   if (domain == AF_INET6) {
-    int v6only = 1; // pon 0 si quieres aceptar IPv4-mapeado también
+    int v6only = 1;
     (void)::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
   }
 
-  // Guardar en el objeto
   this->idSocket = fd;
   this->IPv6     = IPv6;
-  this->type     = (t == 'S') ? 's' : (t == 'D') ? 'd' : t; // normaliza a minúscula
-  // Si tu clase tiene 'port', puedes inicializarlo a 0 aquí:
-  // this->port = 0;
+  this->type     = (t == 'S') ? 's' : (t == 'D') ? 'd' : t;
+
 
 }
 
@@ -98,7 +92,6 @@ VSocket::~VSocket() {
 void VSocket::Close() {
 
    if (this->idSocket >= 0) {
-    // Intento de cierre ordenado (no falla si es UDP o no está conectado)
     ::shutdown(this->idSocket, SHUT_RDWR);
 
     int rc;
@@ -106,7 +99,6 @@ void VSocket::Close() {
       rc = ::close(this->idSocket);
     } while (rc == -1 && errno == EINTR);
 
-    // Marcar como cerrado para evitar doble close
     this->idSocket = -1;
     this->port = 0;
   }
@@ -134,17 +126,13 @@ int VSocket::EstablishConnection( const char * hostip, int port ) {
     throw std::runtime_error("EstablishConnection(hostip,port): invalid port");
   }
 
-  // Convertir puerto a cadena para getaddrinfo (servicio numérico)
   char svc[16];
   std::snprintf(svc, sizeof(svc), "%d", port);
 
   addrinfo hints{};
-  // Mantén coherencia con BuildSocket: familia según this->IPv6
   hints.ai_family = this->IPv6 ? AF_INET6 : AF_INET;
-  // Tipo según this->type: 's'->TCP, 'd'->UDP
   hints.ai_socktype = (this->type == 'd' || this->type == 'D') ? SOCK_DGRAM : SOCK_STREAM;
-  // El servicio es numérico (p.ej., "8080")
-  hints.ai_flags = AI_NUMERICSERV;    // opcional: puedes añadir AI_ADDRCONFIG
+  hints.ai_flags = AI_NUMERICSERV;
 
   addrinfo* res = nullptr;
   int rc = ::getaddrinfo(hostip, svc, &hints, &res);
@@ -162,7 +150,6 @@ int VSocket::EstablishConnection( const char * hostip, int port ) {
     } while (st == -1 && errno == EINTR);
 
     if (st == 0) {
-      // (opcional) guardar el puerto si tu clase lo expone:
       // if (rp->ai_family == AF_INET)
       //   this->port = ntohs(reinterpret_cast<sockaddr_in*>(rp->ai_addr)->sin_port);
       // else if (rp->ai_family == AF_INET6)
@@ -199,14 +186,11 @@ int VSocket::EstablishConnection( const char *host, const char *service ) {
   }
 
   addrinfo hints{};
-  // Opción A (mantener tu selección): fuerza familia según el socket ya creado
   hints.ai_family = this->IPv6 ? AF_INET6 : AF_INET;
-  // Opción B (más flexible): permitir ambas familias y que el sistema elija
   // hints.ai_family = AF_UNSPEC;
 
   hints.ai_socktype = (this->type == 'd' || this->type == 'D') ? SOCK_DGRAM : SOCK_STREAM;
-  // Importante: NO usar AI_NUMERICSERV para aceptar nombres como "http"
-  hints.ai_flags = AI_ADDRCONFIG;  // opcional, filtra direcciones no configuradas
+  hints.ai_flags = AI_ADDRCONFIG;
 
   addrinfo* res = nullptr;
   int rc = ::getaddrinfo(host, service, &hints, &res);
@@ -224,7 +208,6 @@ int VSocket::EstablishConnection( const char *host, const char *service ) {
     } while (st == -1 && errno == EINTR);
 
     if (st == 0) {
-      // (opcional) guardar puerto si tu clase lo tiene:
       // if (rp->ai_family == AF_INET)
       //   this->port = ntohs(reinterpret_cast<sockaddr_in*>(rp->ai_addr)->sin_port);
       // else if (rp->ai_family == AF_INET6)

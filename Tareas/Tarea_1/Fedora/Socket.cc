@@ -94,30 +94,27 @@ size_t Socket::Read( void * buffer, size_t size ) {
       throw std::runtime_error("Read: null buffer");
   }
   if (size == 0) {
-      return 0; // nada que leer
+      return 0;
   }
 
   for (;;) {
       ssize_t n = ::read(this->idSocket, buffer, size);
 
       if (n > 0) {
-          return static_cast<size_t>(n);  // bytes leídos
+          return static_cast<size_t>(n);
       }
       if (n == 0) {
-          return 0; // EOF (el peer cerró ordenadamente)
+          return 0;
       }
 
-      // n < 0 → error
       if (errno == EINTR) {
-          continue; // reintentar si fue interrumpido por una señal
+          continue; 
       }
 
-      // Si el socket está en modo no bloqueante, devolver 0 cuando "no hay datos aún"
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
           return 0;
       }
 
-      // Cualquier otro error se reporta como excepción
       throw std::runtime_error(std::string("Read failed: ") + std::strerror(errno));
   }
 
@@ -141,7 +138,7 @@ size_t Socket::Write( const void * buffer, size_t size ) {
     throw std::runtime_error("Write: null buffer");
   }
   if (size == 0) {
-    return 0; // nada que escribir
+    return 0;
   }
 
   const char* p = static_cast<const char*>(buffer);
@@ -155,22 +152,19 @@ size_t Socket::Write( const void * buffer, size_t size ) {
       if (total == size) {
         return total; // listo
       }
-          // si no bloqueante, puede seguir escribiendo más en siguientes iteraciones
         continue;
     }
 
     if (n == -1) {
       if (errno == EINTR) {
-        continue; // reintentar si fue interrumpido por señal
+        continue;
       }
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        // socket no bloqueante: si ya escribimos algo, devolvemos el parcial
         return total;
       }
       throw std::runtime_error(std::string("Write failed: ") + std::strerror(errno));
     }
 
-      // n == 0 es inusual en write; tratamos como “no progresó”
     return total;
   }
 
