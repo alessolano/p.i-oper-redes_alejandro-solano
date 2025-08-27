@@ -29,7 +29,7 @@ class VSocket {
       virtual size_t Write( const void *, size_t ) = 0;
       virtual size_t Write( const char * ) = 0;
 
-      int Bind( int );
+      int Bind( int port );
 
 // UDP methods
       size_t sendTo( const void *, size_t, void * );

@@ -36,13 +36,35 @@
   *  @param     bool ipv6: if we need a IPv6 socket
   *
  **/
-void VSocket::BuildSocket( char t, bool IPv6 ){
+void VSocket::BuildSocket( char t, bool IPv6 ) {
 
-   int st = -1;
+  const int domain = IPv6 ? AF_INET6 : AF_INET;
 
-   if ( -1 == st ) {
-      throw std::runtime_error( "VSocket::BuildSocket, (reason)" );
-   }
+  int stype = 0;
+  switch (t) {
+    case 's': case 'S': stype = SOCK_STREAM; break; // TCP
+    case 'd': case 'D': stype = SOCK_DGRAM;  break; // UDP
+    default:
+      throw std::runtime_error("VSocket::BuildSocket: tipo desconocido (use 's' o 'd')");
+  }
+
+  int fd = ::socket(domain, stype, 0);
+  if (fd == -1) {
+    throw std::runtime_error(std::string("VSocket::BuildSocket: socket() fallo: ")
+                              + std::strerror(errno));
+  }
+
+  int yes = 1;
+  (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+  if (domain == AF_INET6) {
+    int v6only = 1;
+    (void)::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+  }
+
+  this->idSocket = fd;
+  this->IPv6     = IPv6;
+  this->type     = (t == 'S') ? 's' : (t == 'D') ? 'd' : t;
 
 }
 
@@ -63,12 +85,19 @@ VSocket::~VSocket() {
   *    use Unix close system call (once opened a socket is managed like a file in Unix)
   *
  **/
-void VSocket::Close(){
-   int st = -1;
+void VSocket::Close() {
 
-   if ( -1 == st ) {
-      throw std::runtime_error( "VSocket::Close()" );
-   }
+   if (this->idSocket >= 0) {
+    ::shutdown(this->idSocket, SHUT_RDWR);
+
+    int rc;
+    do {
+      rc = ::close(this->idSocket);
+    } while (rc == -1 && errno == EINTR);
+
+    this->idSocket = -1;
+    this->port = 0;
+  }
 
 }
 
@@ -83,13 +112,54 @@ void VSocket::Close(){
  **/
 int VSocket::EstablishConnection( const char * hostip, int port ) {
 
-   int st = -1;
+  if (this->idSocket < 0) {
+    throw std::runtime_error("EstablishConnection(hostip,port): invalid socket descriptor");
+  }
+  if (!hostip) {
+    throw std::runtime_error("EstablishConnection(hostip,port): null hostip");
+  }
+  if (port <= 0 || port > 65535) {
+    throw std::runtime_error("EstablishConnection(hostip,port): invalid port");
+  }
 
-   if ( -1 == st ) {
-      throw std::runtime_error( "VSocket::EstablishConnection" );
-   }
+  char svc[16];
+  std::snprintf(svc, sizeof(svc), "%d", port);
 
-   return st;
+  addrinfo hints{};
+  hints.ai_family = this->IPv6 ? AF_INET6 : AF_INET;
+  hints.ai_socktype = (this->type == 'd' || this->type == 'D') ? SOCK_DGRAM : SOCK_STREAM;
+  hints.ai_flags = AI_NUMERICSERV;
+
+  addrinfo* res = nullptr;
+  int rc = ::getaddrinfo(hostip, svc, &hints, &res);
+  if (rc != 0) {
+    if (rc == EAI_SYSTEM) {
+      throw std::runtime_error(std::string("getaddrinfo: ") + std::strerror(errno));
+    }
+    throw std::runtime_error(std::string("getaddrinfo: ") + ::gai_strerror(rc));
+  }
+
+  int st = -1;
+  for (addrinfo* rp = res; rp != nullptr; rp = rp->ai_next) {
+    do {
+      st = ::connect(this->idSocket, rp->ai_addr, static_cast<socklen_t>(rp->ai_addrlen));
+    } while (st == -1 && errno == EINTR);
+
+    if (st == 0) {
+      // if (rp->ai_family == AF_INET)
+      //   this->port = ntohs(reinterpret_cast<sockaddr_in*>(rp->ai_addr)->sin_port);
+      // else if (rp->ai_family == AF_INET6)
+      //   this->port = ntohs(reinterpret_cast<sockaddr_in6*>(rp->ai_addr)->sin6_port);
+      break;
+    }
+  }
+
+  ::freeaddrinfo(res);
+
+  if (st == -1) {
+    throw std::runtime_error(std::string("connect failed: ") + std::strerror(errno));
+  }
+  return 0;
 
 }
 
@@ -103,12 +173,51 @@ int VSocket::EstablishConnection( const char * hostip, int port ) {
   *
  **/
 int VSocket::EstablishConnection( const char *host, const char *service ) {
-   int st = -1;
 
-   throw std::runtime_error( "VSocket::EstablishConnection" );
+  if (this->idSocket < 0) {
+    throw std::runtime_error("EstablishConnection(host,service): invalid socket descriptor");
+  }
+  if (!host || !service) {
+    throw std::runtime_error("EstablishConnection(host,service): null host/service");
+  }
 
-   return st;
+  addrinfo hints{};
+  hints.ai_family = this->IPv6 ? AF_INET6 : AF_INET;
+  // hints.ai_family = AF_UNSPEC;
 
+  hints.ai_socktype = (this->type == 'd' || this->type == 'D') ? SOCK_DGRAM : SOCK_STREAM;
+  hints.ai_flags = AI_ADDRCONFIG;
+
+  addrinfo* res = nullptr;
+  int rc = ::getaddrinfo(host, service, &hints, &res);
+  if (rc != 0) {
+    if (rc == EAI_SYSTEM) {
+      throw std::runtime_error(std::string("getaddrinfo: ") + std::strerror(errno));
+    }
+    throw std::runtime_error(std::string("getaddrinfo: ") + ::gai_strerror(rc));
+  }
+
+  int st = -1;
+  for (addrinfo* rp = res; rp != nullptr; rp = rp->ai_next) {
+    do {
+      st = ::connect(this->idSocket, rp->ai_addr, static_cast<socklen_t>(rp->ai_addrlen));
+    } while (st == -1 && errno == EINTR);
+
+    if (st == 0) {
+      // if (rp->ai_family == AF_INET)
+      //   this->port = ntohs(reinterpret_cast<sockaddr_in*>(rp->ai_addr)->sin_port);
+      // else if (rp->ai_family == AF_INET6)
+      //   this->port = ntohs(reinterpret_cast<sockaddr_in6*>(rp->ai_addr)->sin6_port);
+      break;
+    }
+  }
+
+  ::freeaddrinfo(res);
+
+  if (st == -1) {
+    throw std::runtime_error(std::string("connect failed: ") + std::strerror(errno));
+  }
+  return 0;
 }
 
 
@@ -122,9 +231,47 @@ int VSocket::EstablishConnection( const char *host, const char *service ) {
   *
  **/
 int VSocket::Bind( int port ) {
-   int st = -1
+   if (this->idSocket < 0) {
+    throw std::runtime_error("Bind: invalid socket descriptor");
+  }
+  if (port <= 0 || port > 65535) {
+    throw std::runtime_error("Bind: invalid port");
+  }
 
-   return st;
+  int yes = 1;
+  (void)::setsockopt(this->idSocket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+  int st = -1;
+  if (this->IPv6) {
+    sockaddr_in6 addr6{};
+    addr6.sin6_family = AF_INET6;
+    addr6.sin6_port = htons(static_cast<uint16_t>(port));
+    addr6.sin6_addr = in6addr_any;
+
+    do {
+      st = ::bind(this->idSocket,
+                  reinterpret_cast<const struct ::sockaddr*>(&addr6),
+                  static_cast<socklen_t>(sizeof(addr6)));
+    } while (st == -1 && errno == EINTR);
+  } else {
+    sockaddr_in addr4{};
+    addr4.sin_family = AF_INET;
+    addr4.sin_port = htons(static_cast<uint16_t>(port));
+    addr4.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    do {
+      st = ::bind(this->idSocket,
+                  reinterpret_cast<const struct ::sockaddr*>(&addr4),
+                  static_cast<socklen_t>(sizeof(addr4)));
+    } while (st == -1 && errno == EINTR);
+  }
+
+  if (st == -1) {
+    throw std::runtime_error(std::string("bind failed: ") + std::strerror(errno));
+  }
+
+  this->port = port;
+  return 0;
 
 }
 
@@ -140,9 +287,35 @@ int VSocket::Bind( int port ) {
   *
  **/
 size_t VSocket::sendTo( const void * buffer, size_t size, void * addr ) {
-   int st = -1;
+  if (this->idSocket < 0) {
+    throw std::runtime_error("sendTo: invalid socket descriptor");
+  }
+  if (!buffer) {
+    throw std::runtime_error("sendTo: null buffer");
+  }
+  if (size == 0) {
+    return 0;
+  }
 
-   return st;
+  const struct ::sockaddr* sa = nullptr;
+  socklen_t slen = 0;
+
+  if (addr) {
+    if (this->IPv6) {
+      slen = static_cast<socklen_t>(sizeof(struct sockaddr_in6));
+    } else {
+      slen = static_cast<socklen_t>(sizeof(struct sockaddr_in));
+    }
+    sa = reinterpret_cast<const struct ::sockaddr*>(addr);
+  }
+
+  for (;;) {
+    ssize_t n = ::sendto(this->idSocket, buffer, size, 0, sa, slen);
+    if (n >= 0) return static_cast<size_t>(n);
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+    throw std::runtime_error(std::string("sendto failed: ") + std::strerror(errno));
+  }
 
 }
 
@@ -160,9 +333,43 @@ size_t VSocket::sendTo( const void * buffer, size_t size, void * addr ) {
   *
  **/
 size_t VSocket::recvFrom( void * buffer, size_t size, void * addr ) {
-   int st = -1;
+  if (this->idSocket < 0) {
+    throw std::runtime_error("recvFrom: invalid socket descriptor");
+  }
+  if (!buffer) {
+    throw std::runtime_error("recvFrom: null buffer");
+  }
+  if (size == 0) {
+    return 0;
+  }
 
-   return st;
+  struct sockaddr_storage from{};
+  socklen_t flen = static_cast<socklen_t>(sizeof(from));
 
+  for (;;) {
+    ssize_t n = ::recvfrom(
+      this->idSocket,
+      buffer,
+      size,
+      0,
+      addr ? reinterpret_cast<struct ::sockaddr*>(&from) : nullptr,
+      addr ? &flen : nullptr
+    );
+
+    if (n >= 0) {
+      if (addr) {
+        if (from.ss_family == AF_INET6) {
+          std::memcpy(addr, &from, sizeof(struct sockaddr_in6));
+        } else if (from.ss_family == AF_INET) {
+          std::memcpy(addr, &from, sizeof(struct sockaddr_in));
+        }
+      }
+      return static_cast<size_t>(n);
+    }
+
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+    throw std::runtime_error(std::string("recvfrom failed: ") + std::strerror(errno));
+  }
 }
 
